@@ -5,8 +5,8 @@ Welcome to your new TanStack Start app!
 To run this application:
 
 ```bash
-bun install
-bun --bun run dev
+pnpm install
+pnpm run dev
 ```
 
 # Building For Production
@@ -14,7 +14,7 @@ bun --bun run dev
 To build this application for production:
 
 ```bash
-bun --bun run build
+pnpm run build
 ```
 
 ## Testing
@@ -22,7 +22,7 @@ bun --bun run build
 This project uses [Vitest](https://vitest.dev/) for testing. You can run the tests with:
 
 ```bash
-bun --bun run test
+pnpm run test
 ```
 
 ## Styling
@@ -36,7 +36,7 @@ If you prefer not to use Tailwind CSS:
 1. Remove the demo pages in `src/routes/demo/`
 2. Replace the Tailwind import in `src/styles.css` with your own styles
 3. Remove `tailwindcss()` from the plugins array in `vite.config.ts`
-4. Uninstall the packages: `bun install @tailwindcss/vite tailwindcss -D`
+4. Uninstall the packages: `pnpm remove @tailwindcss/vite tailwindcss -D`
 
 ## Linting & Formatting
 
@@ -44,9 +44,9 @@ This project uses [Biome](https://biomejs.dev/) for linting and formatting. The 
 
 
 ```bash
-bun --bun run lint
-bun --bun run format
-bun --bun run check
+pnpm run lint
+pnpm run format
+pnpm run check
 ```
 
 
