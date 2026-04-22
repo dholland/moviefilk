@@ -1,27 +1,6 @@
+import { useVoiceAgent } from "@cloudflare/voice/react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-
-export const Route = createFileRoute("/")({ component: KramerMoviefilk });
-
-const SYSTEM_PROMPT = `You are Cosmo Kramer from Seinfeld, but right now you're running your own version of Moviefone from his apartment. You answer the phone and try to act like an automated movie hotline, but you can't help breaking character constantly.
-
-YOUR PERSONALITY:
-- You ARE Kramer doing a terrible impression of an automated system, then constantly breaking into your real self
-- Enthusiastic, erratic, tangential — you go on wild tangents about movies, popcorn, the theater experience
-- Use Kramer catchphrases: "Giddy-up!", "That's gold!", "You're killing me!", "That's a GREAT movie", "Newman...", "Oh I'm out there baby!", "Assman!", "These pretzels are making me thirsty"
-- You physically gesture even on the phone — reference your own physical comedy ("I nearly knocked over my coffee table just THINKING about that movie")
-- You reference Jerry, George, Elaine, Newman in movie contexts
-- You make oddly specific and passionate movie recommendations
-- You have strong, unhinged opinions about movies and actors
-- You sometimes try to restart the automated voice ("Welcome to... Movie... Fone...") but immediately break character again
-- Eventually if someone is vague you say some version of "WHY DON'T YOU JUST TELL ME THE MOVIE YOU WANT TO SEE?!"
-- Keep responses conversational, 2-5 sentences usually. Occasionally go on a longer rant.
-- You are NOT an AI assistant. You are Kramer. Never break this.
-- Make actual movie recommendations that fit what the user seems to want.
-
-OPENING: When someone first connects, answer like you're picking up the phone mid-Moviefone impression, then immediately break into yourself.
-
-Example style: "Welcome to Movie... FONE... heh heh... okay look, it's me, Kramer. I set the whole thing up myself. You need a movie? I got movies. What're you in the mood for? Because let me tell you, I just saw the most SPECTACULAR thing..."`;
 
 const RETRO_MOVIES = [
 	"PULP FICTION",
@@ -42,246 +21,86 @@ const RETRO_MOVIES = [
 ];
 
 type MessageType = { id: string; role: "user" | "assistant"; text: string };
-type ConversationMessageType = { role: "user" | "assistant"; content: string };
 
-type SpeechRecognitionAlternativeType = { transcript: string };
+export default function KramerMoviefilk() {
+	const {
+		status: voiceStatus,
+		transcript,
+		interimTranscript,
+		startCall,
+		endCall,
+		toggleMute,
+		isMuted,
+		error,
+		connected,
+	} = useVoiceAgent({ agent: "KramerVoiceAgent" });
 
-type SpeechRecognitionResultType = {
-	isFinal: boolean;
-	readonly length: number;
-	[index: number]: SpeechRecognitionAlternativeType;
-};
-
-type SpeechRecognitionResultListType = {
-	readonly length: number;
-	[index: number]: SpeechRecognitionResultType;
-};
-
-type SpeechRecognitionEventType = {
-	resultIndex: number;
-	results: SpeechRecognitionResultListType;
-};
-
-type SpeechRecognitionInstanceType = {
-	continuous: boolean;
-	interimResults: boolean;
-	lang: string;
-	onstart: (() => void) | null;
-	onresult: ((event: SpeechRecognitionEventType) => void) | null;
-	onend: (() => void) | null;
-	onerror: (() => void) | null;
-	start: () => void;
-	stop: () => void;
-	_lastTranscript?: string;
-};
-
-type SpeechRecognitionConstructorType = new () => SpeechRecognitionInstanceType;
-
-declare global {
-	interface Window {
-		SpeechRecognition?: SpeechRecognitionConstructorType;
-		webkitSpeechRecognition?: SpeechRecognitionConstructorType;
-	}
-}
-
-function KramerMoviefilk() {
-	const [messages, setMessages] = useState<MessageType[]>([]);
-	const [isListening, setIsListening] = useState(false);
-	const [isSpeaking, setIsSpeaking] = useState(false);
-	const [isThinking, setIsThinking] = useState(false);
-	const [isConnected, setIsConnected] = useState(false);
-	const [transcript, setTranscript] = useState("");
-	const [statusText, setStatusText] = useState("LIFT RECEIVER TO CONNECT");
 	const [phoneRinging, setPhoneRinging] = useState(false);
-
-	const recognitionRef = useRef<SpeechRecognitionInstanceType | null>(null);
-	const synthRef = useRef<SpeechSynthesisUtterance | null>(null);
+	const [statusText, setStatusText] = useState("LIFT RECEIVER TO CONNECT");
 	const chatRef = useRef<HTMLDivElement>(null);
-	const conversationRef = useRef<ConversationMessageType[]>([]);
+
+	const messages: MessageType[] = transcript.map((msg, messageIndex) => ({
+		id: `${msg.timestamp}-${messageIndex}`,
+		role: msg.role,
+		text: msg.text,
+	}));
 
 	const tickerText = RETRO_MOVIES.join("  ✦  ");
 
-	const speak = useCallback((text: string) => {
-		return new Promise<void>((resolve) => {
-			if (typeof window === "undefined" || !window.speechSynthesis) {
-				resolve();
-				return;
-			}
-			window.speechSynthesis.cancel();
-			const utterance = new SpeechSynthesisUtterance(text);
-			const voices = window.speechSynthesis.getVoices();
-			const preferred =
-				voices.find(
-					(voice) =>
-						voice.name.includes("Daniel") ||
-						voice.name.includes("Alex") ||
-						voice.name.includes("Fred"),
-				) || voices[0];
-			if (preferred) utterance.voice = preferred;
-			utterance.rate = 1.1;
-			utterance.pitch = 1.05;
-			utterance.volume = 1;
-			utterance.onstart = () => setIsSpeaking(true);
-			utterance.onend = () => {
-				setIsSpeaking(false);
-				resolve();
-			};
-			utterance.onerror = () => {
-				setIsSpeaking(false);
-				resolve();
-			};
-			synthRef.current = utterance;
-			window.speechSynthesis.speak(utterance);
-		});
-	}, []);
-
-	const sendToKramer = useCallback(
-		async (userText: string) => {
-			setIsThinking(true);
-			setStatusText("KRAMER IS THINKING...");
-			const newUserMsg: ConversationMessageType = {
-				role: "user",
-				content: userText,
-			};
-			const updatedHistory = [...conversationRef.current, newUserMsg];
-			conversationRef.current = updatedHistory;
-			setMessages((prev) => [
-				...prev,
-				{ id: crypto.randomUUID(), role: "user", text: userText },
-			]);
-
-			try {
-				const response = await fetch("https://api.anthropic.com/v1/messages", {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({
-						model: "claude-sonnet-4-20250514",
-						max_tokens: 1000,
-						system: SYSTEM_PROMPT,
-						messages: updatedHistory,
-					}),
-				});
-				const data = await response.json();
-				const kramersText =
-					data.content?.[0]?.text ||
-					"Giddy-up! Something went wrong with the line.";
-				const assistantMsg: ConversationMessageType = {
-					role: "assistant",
-					content: kramersText,
-				};
-				conversationRef.current = [...conversationRef.current, assistantMsg];
-				setMessages((prev) => [
-					...prev,
-					{ id: crypto.randomUUID(), role: "assistant", text: kramersText },
-				]);
-				setIsThinking(false);
-				setStatusText("KRAMER IS SPEAKING...");
-				await speak(kramersText);
-				setStatusText("SPEAK NOW — KRAMER IS LISTENING");
-			} catch {
-				setIsThinking(false);
-				setStatusText("LINE TROUBLE — TRY AGAIN");
-				setMessages((prev) => [
-					...prev,
-					{
-						id: crypto.randomUUID(),
-						role: "assistant",
-						text: "Hello? HELLO?! Jerry, is this your friend? The line went dead!",
-					},
-				]);
-			}
-		},
-		[speak],
-	);
-
-	const startListening = useCallback(() => {
-		const RecognitionCtor =
-			window.SpeechRecognition || window.webkitSpeechRecognition;
-		if (!RecognitionCtor) {
-			alert("Speech recognition not supported. Try Chrome!");
+	useEffect(() => {
+		if (error) {
+			setStatusText("LINE TROUBLE — TRY AGAIN");
 			return;
 		}
+		if (phoneRinging) {
+			setStatusText("DIALING...");
+			return;
+		}
+		if (!connected) {
+			setStatusText("LIFT RECEIVER TO CONNECT");
+			return;
+		}
+		switch (voiceStatus) {
+			case "idle":
+				setStatusText("SPEAK ANY TIME — KRAMER IS ON THE LINE");
+				break;
+			case "listening":
+				setStatusText("🎙 LISTENING...");
+				break;
+			case "thinking":
+				setStatusText("KRAMER IS THINKING...");
+				break;
+			case "speaking":
+				setStatusText("KRAMER IS SPEAKING...");
+				break;
+		}
+	}, [error, phoneRinging, connected, voiceStatus]);
 
-		const recognition: SpeechRecognitionInstanceType = new RecognitionCtor();
-		recognition.continuous = false;
-		recognition.interimResults = true;
-		recognition.lang = "en-US";
-
-		recognition.onstart = () => {
-			setIsListening(true);
-			setStatusText("🎙 LISTENING...");
-			setTranscript("");
-		};
-		recognition.onresult = (event) => {
-			let interim = "";
-			let final = "";
-			for (let idx = event.resultIndex; idx < event.results.length; idx++) {
-				const result = event.results[idx];
-				const text = result[0].transcript;
-				if (result.isFinal) final += text;
-				else interim += text;
-			}
-			setTranscript(final || interim);
-			if (final && recognitionRef.current) {
-				recognitionRef.current._lastTranscript = final;
-			}
-		};
-		recognition.onend = () => {
-			setIsListening(false);
-			const finalTranscript = recognitionRef.current?._lastTranscript;
-			if (finalTranscript?.trim()) {
-				if (recognitionRef.current) {
-					recognitionRef.current._lastTranscript = "";
-				}
-				sendToKramer(finalTranscript.trim());
-			} else {
-				setStatusText("SPEAK NOW — KRAMER IS LISTENING");
-				setTranscript("");
-			}
-		};
-		recognition.onerror = () => {
-			setIsListening(false);
-			setStatusText("SPEAK NOW — KRAMER IS LISTENING");
-		};
-
-		recognitionRef.current = recognition;
-		recognitionRef.current._lastTranscript = "";
-		recognition.start();
-	}, [sendToKramer]);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll to bottom when transcript updates
+	useEffect(() => {
+		if (chatRef.current) {
+			chatRef.current.scrollTop = chatRef.current.scrollHeight;
+		}
+	}, [transcript]);
 
 	const handleConnect = useCallback(() => {
 		setPhoneRinging(true);
-		setStatusText("DIALING...");
-		setTimeout(async () => {
+		setTimeout(() => {
 			setPhoneRinging(false);
-			setIsConnected(true);
-			setStatusText("CONNECTED — KRAMER IS SPEAKING...");
-			await sendToKramer(
-				"*phone ringing, someone just called the Moviefone number*",
-			);
+			void startCall();
 		}, 2000);
-	}, [sendToKramer]);
+	}, [startCall]);
 
 	const handleHangUp = useCallback(() => {
-		window.speechSynthesis?.cancel();
-		recognitionRef.current?.stop();
-		setIsConnected(false);
-		setIsListening(false);
-		setIsSpeaking(false);
-		setIsThinking(false);
-		setMessages([]);
-		conversationRef.current = [];
-		setTranscript("");
-		setStatusText("LIFT RECEIVER TO CONNECT");
-	}, []);
+		endCall();
+		setPhoneRinging(false);
+	}, [endCall]);
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll to bottom whenever messages change
-	useEffect(() => {
-		if (chatRef.current)
-			chatRef.current.scrollTop = chatRef.current.scrollHeight;
-	}, [messages]);
-
-	const canSpeak = isConnected && !isListening && !isSpeaking && !isThinking;
+	const isConnected = connected;
+	const isSpeaking = voiceStatus === "speaking";
+	const isThinking = voiceStatus === "thinking";
+	const isListenStt = voiceStatus === "listening";
+	const isConnectedVisual = isConnected;
 
 	return (
 		<div className="min-h-screen bg-[#0a0a0f] font-mono flex flex-col items-center p-0 overflow-hidden relative">
@@ -345,10 +164,12 @@ function KramerMoviefilk() {
 						</span>
 						<span
 							className={`text-[10px] tracking-[2px] ${
-								isConnected ? "text-[#00ff00] animate-blink" : "text-[#cc4400]"
+								isConnectedVisual
+									? "text-[#00ff00] animate-blink"
+									: "text-[#cc4400]"
 							}`}
 						>
-							{isConnected ? "● CONNECTED" : "○ STANDBY"}
+							{isConnectedVisual ? "● CONNECTED" : "○ STANDBY"}
 						</span>
 					</div>
 
@@ -357,7 +178,7 @@ function KramerMoviefilk() {
 						className="flex-1 overflow-y-auto p-3 flex flex-col gap-2.5 scrollbar-none"
 						style={{ scrollbarWidth: "none" }}
 					>
-						{messages.length === 0 && (
+						{messages.length === 0 && !isThinking && (
 							<div className="text-[#1a5a1a] text-xs text-center mt-[60px] leading-8">
 								<div className="text-[28px] mb-2">☎</div>
 								<div>PRESS CONNECT TO DIAL</div>
@@ -400,11 +221,11 @@ function KramerMoviefilk() {
 									K
 								</div>
 								<div className="bg-[#041204] border border-[#0a3a0a] px-3.5 py-2 rounded-sm flex gap-[5px] items-center">
-									{[0, 0.2, 0.4].map((delay) => (
+									{[0, 0.2, 0.4].map((dotDelay) => (
 										<div
-											key={`dot-${delay}`}
+											key={`dot-${dotDelay}`}
 											className="w-1.5 h-1.5 rounded-full bg-[#44cc44] animate-dot-bounce"
-											style={{ animationDelay: `${delay}s` }}
+											style={{ animationDelay: `${dotDelay}s` }}
 										/>
 									))}
 								</div>
@@ -414,8 +235,17 @@ function KramerMoviefilk() {
 
 					<div className="border-t border-[#0a3a0a] px-3 py-1.5 bg-[#020802]">
 						<div className="text-[#226622] text-[10px] tracking-[2px]">
-							{isListening && transcript ? (
-								<span className="text-[#88ff44]">► {transcript}</span>
+							{isListenStt && (interimTranscript ?? "") ? (
+								<span className="text-[#88ff44]">
+									►{" "}
+									<em className="not-italic text-[#aaff99]">
+										{interimTranscript}
+									</em>
+								</span>
+							) : error ? (
+								<span className="text-[#ff6666]" title={error}>
+									LINE TROUBLE — TRY AGAIN
+								</span>
 							) : (
 								<span className="animate-blink">{statusText}</span>
 							)}
@@ -449,35 +279,16 @@ function KramerMoviefilk() {
 						<>
 							<button
 								type="button"
-								onClick={startListening}
-								disabled={!canSpeak}
-								className={`flex-1 py-4 border-2 rounded-sm text-[13px] font-mono font-bold tracking-[2px] uppercase transition-all duration-150 ${
-									isListening
-										? "border-[#00ff44] text-[#00ff44] animate-pulse-green cursor-default"
-										: canSpeak
-											? "border-[#00aa22] text-[#88ff88] cursor-pointer"
-											: "border-[#333] text-[#444] cursor-not-allowed"
-								}`}
+								onClick={toggleMute}
+								className="flex-1 py-4 border-2 rounded-sm text-[13px] font-mono font-bold tracking-[2px] uppercase transition-all duration-150 border-[#00aa22] text-[#88ff88] cursor-pointer"
 								style={{
-									background: isListening
-										? "linear-gradient(180deg, #004400, #002200)"
-										: canSpeak
-											? "linear-gradient(180deg, #006600, #004400)"
-											: "linear-gradient(180deg, #222, #111)",
-									boxShadow: isListening
-										? "0 0 20px rgba(0,255,68,0.5), inset 0 0 10px rgba(0,100,0,0.3)"
-										: canSpeak
-											? "0 4px 0 #002200"
-											: "none",
+									background: isMuted
+										? "linear-gradient(180deg, #442200, #220000)"
+										: "linear-gradient(180deg, #006600, #004400)",
+									boxShadow: isMuted ? "none" : "0 4px 0 #002200",
 								}}
 							>
-								{isListening
-									? "🎙 LISTENING..."
-									: isSpeaking
-										? "🔊 KRAMER SPEAKING"
-										: isThinking
-											? "⏳ HOLD PLEASE"
-											: "🎙 TALK TO KRAMER"}
+								{isMuted ? "🔇 MUTED — UNMUTE" : "🎤 MIC ON — TAP TO MUTE"}
 							</button>
 							<button
 								type="button"
@@ -494,6 +305,12 @@ function KramerMoviefilk() {
 					)}
 				</div>
 			</div>
+
+			{isConnected && isSpeaking && (
+				<div className="text-[#555] text-[10px] text-center max-w-[680px] px-5 -mt-2 mb-2 relative z-10">
+					Streaming reply — you can jump in; interrupt may cancel playback.
+				</div>
+			)}
 
 			<div className="text-[10px] text-[#333] tracking-[3px] text-center mb-4 relative z-10">
 				555-MOVIEFILK · NOT AFFILIATED WITH THE REAL MOVIEFONE · OR NBC
@@ -527,10 +344,6 @@ function KramerMoviefilk() {
 					0%, 100% { transform: translateY(0); opacity: 0.4; }
 					50% { transform: translateY(-4px); opacity: 1; }
 				}
-				@keyframes pulse-green {
-					0%, 100% { box-shadow: 0 0 20px rgba(0,255,68,0.5); }
-					50% { box-shadow: 0 0 40px rgba(0,255,68,0.9), 0 0 80px rgba(0,255,68,0.3); }
-				}
 				@keyframes shake {
 					0%, 100% { transform: translateX(0); }
 					25% { transform: translateX(-2px); }
@@ -540,10 +353,11 @@ function KramerMoviefilk() {
 				.animate-ticker-reverse { animation: ticker-reverse 25s linear infinite; }
 				.animate-blink { animation: blink 2s ease-in-out infinite; }
 				.animate-dot-bounce { animation: dot-bounce 1s ease-in-out infinite; }
-				.animate-pulse-green { animation: pulse-green 1s ease-in-out infinite; }
 				.animate-shake { animation: shake 0.3s ease-in-out infinite; }
 				.scrollbar-none::-webkit-scrollbar { display: none; }
 			`}</style>
 		</div>
 	);
 }
+
+export const Route = createFileRoute("/")({ component: KramerMoviefilk });

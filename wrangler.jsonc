@@ -1,13 +1,30 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "movieflik",
-  "compatibility_date": "2025-09-02",
-  "compatibility_flags": ["nodejs_compat"],
-  "main": "@tanstack/react-start/server-entry",
-  "routes": [
-    {
-      "pattern": "movieflik.biz/*",
-      "custom_domain": true
-    }
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "movieflik",
+	"compatibility_date": "2025-09-02",
+	"compatibility_flags": ["nodejs_compat"],
+	"main": "src/server.ts",
+	"ai": {
+		"binding": "AI"
+	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "KramerVoiceAgent",
+				"class_name": "KramerVoiceAgent"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "kramer-voice-v1",
+			"new_sqlite_classes": ["KramerVoiceAgent"]
+		}
+	],
+	"routes": [
+		{
+			"pattern": "movieflik.biz/*",
+			"custom_domain": true
+		}
+	]
 }
