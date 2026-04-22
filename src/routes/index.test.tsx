@@ -5,8 +5,8 @@ import {
 	describe,
 	expect,
 	it,
-	vi,
 	type Mock,
+	vi,
 } from "vitest";
 
 import type { MicPermissionStateType } from "../lib/mic-permissions";
@@ -51,7 +51,7 @@ function voiceDefaults() {
 		interimTranscript: null,
 		metrics: null,
 		audioLevel: 0,
-		startCall: vi.fn(),
+		startCall: vi.fn().mockResolvedValue(undefined),
 		endCall: vi.fn(),
 		toggleMute: vi.fn(),
 		sendText: vi.fn(),
@@ -89,14 +89,11 @@ describe("KramerMoviefilk — mic permission UX", () => {
 		["no-device", "NO MIC DETECTED — PLUG ONE IN"],
 		["in-use", "MIC IN USE BY ANOTHER APP — CLOSE IT AND RETRY"],
 		["denied", "MIC BLOCKED — UNLOCK IN BROWSER SETTINGS"],
-	] as const)(
-		"renders the correct status copy when mic state is '%s'",
-		(state, copy) => {
-			mockMic({ state });
-			render(<KramerMoviefilk />);
-			expect(screen.getByText(copy)).toBeInTheDocument();
-		},
-	);
+	] as const)("renders the correct status copy when mic state is '%s'", (state, copy) => {
+		mockMic({ state });
+		render(<KramerMoviefilk />);
+		expect(screen.getByText(copy)).toBeInTheDocument();
+	});
 
 	it("renders the recovery panel with a working RETRY button when denied", () => {
 		const request = mockMic({
@@ -115,7 +112,9 @@ describe("KramerMoviefilk — mic permission UX", () => {
 		mockMic({ state: "in-use" });
 		render(<KramerMoviefilk />);
 		expect(screen.getByTestId("mic-recovery-panel")).toBeInTheDocument();
-		expect(screen.getByText(/another app is using the mic/i)).toBeInTheDocument();
+		expect(
+			screen.getByText(/another app is using the mic/i),
+		).toBeInTheDocument();
 	});
 
 	it("renders the recovery panel for 'no-device' with retry", () => {
@@ -203,8 +202,14 @@ describe("KramerMoviefilk — mic permission UX", () => {
 		await act(async () => {
 			vi.advanceTimersByTime(2000);
 		});
+		// `startCall` resolves, then `queueMicrotask` runs the PTT default-mute.
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		});
 
 		expect(voice.startCall).toHaveBeenCalledTimes(1);
+		expect(voice.toggleMute).toHaveBeenCalledTimes(1);
 	});
 
 	it("still shows CONNECT and STANDBY when the WebSocket is already connected on load", () => {
@@ -216,13 +221,56 @@ describe("KramerMoviefilk — mic permission UX", () => {
 		expect(
 			screen.getByRole("button", { name: /CONNECT/i }),
 		).toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: /HANG UP/i })).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: /HANG UP/i }),
+		).not.toBeInTheDocument();
 	});
 
 	it("HANG UP ends the session and returns to CONNECT", async () => {
 		vi.useFakeTimers();
 		const request = vi.fn().mockResolvedValue("granted");
 		const voice = mockVoice({ connected: true });
+		mockMic({ state: "prompt", request });
+		const { rerender } = render(<KramerMoviefilk />);
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: /CONNECT/i }));
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		await act(async () => {
+			vi.advanceTimersByTime(2000);
+		});
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		expect(voice.startCall).toHaveBeenCalledTimes(1);
+		expect(voice.toggleMute).toHaveBeenCalledTimes(1);
+		mockVoice({ ...voice, isMuted: true, status: "idle", connected: true });
+		rerender(<KramerMoviefilk />);
+		expect(
+			screen.getByText("MIC OFF — TAP THE MIC BUTTON TO SPEAK"),
+		).toBeInTheDocument();
+
+		const hangUp = screen.getByRole("button", { name: /HANG UP/i });
+		fireEvent.click(hangUp);
+		expect(voice.endCall).toHaveBeenCalledTimes(1);
+
+		expect(
+			screen.getByRole("button", { name: /CONNECT/i }),
+		).toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: /HANG UP/i }),
+		).not.toBeInTheDocument();
+	});
+
+	it("does not PTT arm toggle when startCall rejects", async () => {
+		vi.useFakeTimers();
+		const request = vi.fn().mockResolvedValue("granted");
+		const startCall = vi.fn().mockRejectedValue(new Error("ws failed"));
+		const voice = mockVoice({ startCall, connected: true });
 		mockMic({ state: "prompt", request });
 		render(<KramerMoviefilk />);
 
@@ -234,16 +282,13 @@ describe("KramerMoviefilk — mic permission UX", () => {
 		await act(async () => {
 			vi.advanceTimersByTime(2000);
 		});
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		});
 
-		expect(voice.startCall).toHaveBeenCalledTimes(1);
-		const hangUp = screen.getByRole("button", { name: /HANG UP/i });
-		fireEvent.click(hangUp);
-		expect(voice.endCall).toHaveBeenCalledTimes(1);
-
-		expect(
-			screen.getByRole("button", { name: /CONNECT/i }),
-		).toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: /HANG UP/i })).not.toBeInTheDocument();
+		expect(startCall).toHaveBeenCalledTimes(1);
+		expect(voice.toggleMute).not.toHaveBeenCalled();
 	});
 
 	it("skips ringing and startCall when the mic request resolves to denied", async () => {

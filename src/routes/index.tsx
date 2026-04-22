@@ -3,24 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMicPermission } from "../hooks/useMicPermission";
 import type { MicPermissionStateType } from "../lib/mic-permissions";
-
-const RETRO_MOVIES = [
-	"PULP FICTION",
-	"THE MATRIX",
-	"GOODFELLAS",
-	"JURASSIC PARK",
-	"HOME ALONE",
-	"TITANIC",
-	"THE LION KING",
-	"FORREST GUMP",
-	"SCHINDLER'S LIST",
-	"SPEED",
-	"DIE HARD",
-	"TERMINATOR 2",
-	"SILENCE OF THE LAMBS",
-	"BRAVEHEART",
-	"SEVEN",
-];
+import { NOW_SHOWING_TITLES } from "../lib/now-showing-catalog";
 
 type MessageType = { id: string; role: "user" | "assistant"; text: string };
 
@@ -115,6 +98,13 @@ export default function KramerMoviefilk() {
 	const [statusText, setStatusText] = useState("LIFT RECEIVER TO CONNECT");
 	const chatRef = useRef<HTMLDivElement>(null);
 	const ringTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	/** Mirrors `isMuted` for use inside async post-`startCall` work (avoids stale closures). */
+	const isMutedRef = useRef(isMuted);
+	isMutedRef.current = isMuted;
+	/** Set in `handleHangUp` / disconnect so a late PTT microtask does not toggle after hang-up. */
+	const pushToTalkCanceledRef = useRef(false);
+	/** True after the one-time post-`startCall` mute has been applied for this call session. */
+	const pushToTalkInitDoneRef = useRef(false);
 
 	const messages: MessageType[] = transcript.map((msg, messageIndex) => ({
 		id: `${msg.timestamp}-${messageIndex}`,
@@ -122,7 +112,7 @@ export default function KramerMoviefilk() {
 		text: msg.text,
 	}));
 
-	const tickerText = RETRO_MOVIES.join("  ✦  ");
+	const tickerText = NOW_SHOWING_TITLES.join("  ✦  ");
 
 	useEffect(() => {
 		// Precedence (highest first): voice-hook error, environment problems
@@ -163,10 +153,18 @@ export default function KramerMoviefilk() {
 		}
 		switch (voiceStatus) {
 			case "idle":
-				setStatusText("SPEAK ANY TIME — KRAMER IS ON THE LINE");
+				setStatusText(
+					isMuted
+						? "MIC OFF — TAP THE MIC BUTTON TO SPEAK"
+						: "LINE OPEN — KRAMER IS ON THE LINE",
+				);
 				break;
 			case "listening":
-				setStatusText("🎙 LISTENING...");
+				setStatusText(
+					isMuted
+						? "MIC OFF — NOT TRANSMITTING"
+						: "🎙 ON THE AIR — LISTENING...",
+				);
 				break;
 			case "thinking":
 				setStatusText("KRAMER IS THINKING...");
@@ -175,7 +173,7 @@ export default function KramerMoviefilk() {
 				setStatusText("KRAMER IS SPEAKING...");
 				break;
 		}
-	}, [error, micState, phoneRinging, callSessionActive, voiceStatus]);
+	}, [error, isMuted, micState, phoneRinging, callSessionActive, voiceStatus]);
 
 	useEffect(() => {
 		if (!connected && callSessionActive) {
@@ -185,6 +183,8 @@ export default function KramerMoviefilk() {
 			}
 			setPhoneRinging(false);
 			setCallSessionActive(false);
+			pushToTalkCanceledRef.current = true;
+			pushToTalkInitDoneRef.current = false;
 		}
 	}, [connected, callSessionActive]);
 
@@ -219,6 +219,9 @@ export default function KramerMoviefilk() {
 			return;
 		}
 
+		pushToTalkCanceledRef.current = false;
+		pushToTalkInitDoneRef.current = false;
+
 		setPhoneRinging(true);
 		if (ringTimeoutRef.current) {
 			clearTimeout(ringTimeoutRef.current);
@@ -227,15 +230,31 @@ export default function KramerMoviefilk() {
 			ringTimeoutRef.current = null;
 			setPhoneRinging(false);
 			setCallSessionActive(true);
-			void startCall();
+			void (async () => {
+				try {
+					await startCall();
+				} catch {
+					return;
+				}
+				queueMicrotask(() => {
+					if (pushToTalkCanceledRef.current) return;
+					if (pushToTalkInitDoneRef.current) return;
+					if (!isMutedRef.current) {
+						toggleMute();
+					}
+					pushToTalkInitDoneRef.current = true;
+				});
+			})();
 		}, 2000);
-	}, [micState, micRequest, startCall]);
+	}, [micState, micRequest, startCall, toggleMute]);
 
 	const handleHangUp = useCallback(() => {
 		if (ringTimeoutRef.current) {
 			clearTimeout(ringTimeoutRef.current);
 			ringTimeoutRef.current = null;
 		}
+		pushToTalkCanceledRef.current = true;
+		pushToTalkInitDoneRef.current = false;
 		setPhoneRinging(false);
 		setCallSessionActive(false);
 		endCall();
@@ -388,7 +407,7 @@ export default function KramerMoviefilk() {
 
 					<div className="border-t border-[#0a3a0a] px-3 py-1.5 bg-[#020802]">
 						<div className="text-[#226622] text-[10px] tracking-[2px]">
-							{isListenStt && (interimTranscript ?? "") ? (
+							{isListenStt && !isMuted && (interimTranscript ?? "") ? (
 								<span className="text-[#88ff44]">
 									►{" "}
 									<em className="not-italic text-[#aaff99]">
@@ -466,7 +485,9 @@ export default function KramerMoviefilk() {
 										boxShadow: isMuted ? "none" : "0 4px 0 #002200",
 									}}
 								>
-									{isMuted ? "🔇 MUTED — UNMUTE" : "🎤 MIC ON — TAP TO MUTE"}
+									{isMuted
+										? "🎤 TAP TO SPEAK (PUSH-TO-TALK)"
+										: "🎙 LIVE — TAP WHEN FINISHED"}
 								</button>
 								<button
 									type="button"
@@ -484,6 +505,7 @@ export default function KramerMoviefilk() {
 					</div>
 
 					{showMicRecoveryPanel && (
+						// biome-ignore lint/a11y/useSemanticElements: `role="status"` live region; not a form `<output>`.
 						<div
 							role="status"
 							aria-live="polite"
@@ -535,7 +557,8 @@ export default function KramerMoviefilk() {
 
 			{callSessionActive && isSpeaking && (
 				<div className="text-[#555] text-[10px] text-center max-w-[680px] px-5 -mt-2 mb-2 relative z-10">
-					Streaming reply — you can jump in; interrupt may cancel playback.
+					Streaming reply — unmute the mic to jump in; interrupt may cancel
+					playback.
 				</div>
 			)}
 
@@ -547,7 +570,7 @@ export default function KramerMoviefilk() {
 				<div className="flex whitespace-nowrap animate-ticker-reverse text-[#ffe000] text-xs font-bold tracking-[2px]">
 					{["bot-a", "bot-b", "bot-c"].map((key) => (
 						<span key={key}>
-							&nbsp;&nbsp;NOW SHOWING: {RETRO_MOVIES.join("  ★  ")}
+							&nbsp;&nbsp;NOW SHOWING: {NOW_SHOWING_TITLES.join("  ★  ")}
 							&nbsp;&nbsp;
 						</span>
 					))}
