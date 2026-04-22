@@ -18,7 +18,7 @@
     "deploy": "pnpm run build && wrangler deploy"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.71",
+    "@ai-sdk/openai": "^3.0.53",
     "@cloudflare/vite-plugin": "^1.26.0",
     "@cloudflare/voice": "^0.1.2",
     "@tailwindcss/vite": "^4.1.18",

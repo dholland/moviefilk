@@ -109,9 +109,14 @@ export default class ElevenLabsRealtimeTranscriber implements Transcriber {
 	constructor(config: ElevenLabsRealtimeTranscriberConfigType) {
 		this.#apiKey = config.apiKey;
 		this.#modelId = config.modelId ?? DEFAULT_MODEL_ID;
-		this.#fetchImpl = config.fetchImpl ?? fetch;
+		// Workers `fetch` must be invoked with global `this`; storing a bare
+		// reference and calling it causes "Illegal invocation" (see CF docs).
+		this.#fetchImpl =
+			config.fetchImpl ??
+			((input, init) => globalThis.fetch(input, init));
 		this.#createWebSocket =
-			config.createWebSocket ?? ((url: string) => new WebSocket(url));
+			config.createWebSocket ??
+			((url) => new globalThis.WebSocket(url));
 	}
 
 	createSession(options?: TranscriberSessionOptions): TranscriberSession {

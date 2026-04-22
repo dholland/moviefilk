@@ -5,6 +5,9 @@ import { useMicPermission } from "../hooks/useMicPermission";
 import type { MicPermissionStateType } from "../lib/mic-permissions";
 import { NOW_SHOWING_TITLES } from "../lib/now-showing-catalog";
 
+/** `public/ring-sound.mp3` — played during the pre-connect dialing phase. */
+const RING_SOUND_SRC = "/ring-sound.mp3";
+
 type MessageType = { id: string; role: "user" | "assistant"; text: string };
 
 /**
@@ -105,6 +108,8 @@ export default function KramerMoviefilk() {
 	const pushToTalkCanceledRef = useRef(false);
 	/** True after the one-time post-`startCall` mute has been applied for this call session. */
 	const pushToTalkInitDoneRef = useRef(false);
+	/** Looping phone ring while `phoneRinging` is true; stopped before `startCall`. */
+	const ringAudioRef = useRef<HTMLAudioElement | null>(null);
 
 	const messages: MessageType[] = transcript.map((msg, messageIndex) => ({
 		id: `${msg.timestamp}-${messageIndex}`,
@@ -195,6 +200,33 @@ export default function KramerMoviefilk() {
 			}
 		};
 	}, []);
+
+	useEffect(() => {
+		if (!phoneRinging) {
+			const audio = ringAudioRef.current;
+			if (audio) {
+				audio.pause();
+				audio.currentTime = 0;
+			}
+			return;
+		}
+		if (!ringAudioRef.current) {
+			const next = new Audio(RING_SOUND_SRC);
+			next.preload = "auto";
+			next.loop = true;
+			ringAudioRef.current = next;
+		}
+		const audio = ringAudioRef.current;
+		audio.currentTime = 0;
+		// `play()` can return undefined in test environments; Promise.resolve normalizes.
+		void Promise.resolve(audio.play()).catch(() => {
+			// Autoplay or missing asset — dialing UI still runs.
+		});
+		return () => {
+			audio.pause();
+			audio.currentTime = 0;
+		};
+	}, [phoneRinging]);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll to bottom when transcript updates
 	useEffect(() => {
