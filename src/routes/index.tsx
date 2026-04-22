@@ -98,6 +98,10 @@ export default function KramerMoviefilk() {
 	 * a mic call — only this flag should drive connect vs hang-up UI.
 	 */
 	const [callSessionActive, setCallSessionActive] = useState(false);
+	/** Set when `startCall()` rejects; hook `error` may still be null. Cleared on retry / hang-up. */
+	const [connectSessionError, setConnectSessionError] = useState<string | null>(
+		null,
+	);
 	const [statusText, setStatusText] = useState("LIFT RECEIVER TO CONNECT");
 	const chatRef = useRef<HTMLDivElement>(null);
 	const ringTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -108,7 +112,7 @@ export default function KramerMoviefilk() {
 	const pushToTalkCanceledRef = useRef(false);
 	/** True after the one-time post-`startCall` mute has been applied for this call session. */
 	const pushToTalkInitDoneRef = useRef(false);
-	/** Looping phone ring while `phoneRinging` is true; stopped before `startCall`. */
+	/** Looping phone ring while `phoneRinging` is true. `startCall` runs while ringing so Web Audio stays in the CONNECT user-activation chain (see voice TTS plan). */
 	const ringAudioRef = useRef<HTMLAudioElement | null>(null);
 
 	const messages: MessageType[] = transcript.map((msg, messageIndex) => ({
@@ -125,6 +129,10 @@ export default function KramerMoviefilk() {
 		// permission denial, ringing animation, then the normal connected
 		// voice-agent sub-states.
 		if (error) {
+			setStatusText("LINE TROUBLE — TRY AGAIN");
+			return;
+		}
+		if (connectSessionError) {
 			setStatusText("LINE TROUBLE — TRY AGAIN");
 			return;
 		}
@@ -178,7 +186,15 @@ export default function KramerMoviefilk() {
 				setStatusText("KRAMER IS SPEAKING...");
 				break;
 		}
-	}, [error, isMuted, micState, phoneRinging, callSessionActive, voiceStatus]);
+	}, [
+		error,
+		connectSessionError,
+		isMuted,
+		micState,
+		phoneRinging,
+		callSessionActive,
+		voiceStatus,
+	]);
 
 	useEffect(() => {
 		if (!connected && callSessionActive) {
@@ -244,6 +260,8 @@ export default function KramerMoviefilk() {
 		// CONNECT button, so the tap is a no-op here.
 		if (isMicBlocking(micState)) return;
 
+		setConnectSessionError(null);
+
 		const resolved = await micRequest();
 		if (resolved !== "granted") {
 			// The hook has already moved into the appropriate failure state,
@@ -257,26 +275,48 @@ export default function KramerMoviefilk() {
 		setPhoneRinging(true);
 		if (ringTimeoutRef.current) {
 			clearTimeout(ringTimeoutRef.current);
+			ringTimeoutRef.current = null;
 		}
+
+		// `startCall` must run in the same user-gesture chain as CONNECT: a 2s
+		// delay would let strict browsers (notably iOS Safari) refuse to resume
+		// VoiceClient's Web Audio context for TTS, while the ring can still play
+		// via HTMLMediaElement.
+		try {
+			await startCall();
+		} catch (cause) {
+			setPhoneRinging(false);
+			if (!pushToTalkCanceledRef.current) {
+				const message =
+					cause instanceof Error
+						? cause.message
+						: "Could not start the voice call.";
+				setConnectSessionError(message);
+				if (import.meta.env.DEV) {
+					console.error("[KramerMoviefilk] startCall failed", cause);
+				}
+			}
+			return;
+		}
+
+		if (pushToTalkCanceledRef.current) {
+			setPhoneRinging(false);
+			return;
+		}
+
+		queueMicrotask(() => {
+			if (pushToTalkCanceledRef.current) return;
+			if (pushToTalkInitDoneRef.current) return;
+			if (!isMutedRef.current) {
+				toggleMute();
+			}
+			pushToTalkInitDoneRef.current = true;
+		});
+
 		ringTimeoutRef.current = setTimeout(() => {
 			ringTimeoutRef.current = null;
 			setPhoneRinging(false);
 			setCallSessionActive(true);
-			void (async () => {
-				try {
-					await startCall();
-				} catch {
-					return;
-				}
-				queueMicrotask(() => {
-					if (pushToTalkCanceledRef.current) return;
-					if (pushToTalkInitDoneRef.current) return;
-					if (!isMutedRef.current) {
-						toggleMute();
-					}
-					pushToTalkInitDoneRef.current = true;
-				});
-			})();
 		}, 2000);
 	}, [micState, micRequest, startCall, toggleMute]);
 
@@ -287,6 +327,7 @@ export default function KramerMoviefilk() {
 		}
 		pushToTalkCanceledRef.current = true;
 		pushToTalkInitDoneRef.current = false;
+		setConnectSessionError(null);
 		setPhoneRinging(false);
 		setCallSessionActive(false);
 		endCall();
@@ -446,8 +487,11 @@ export default function KramerMoviefilk() {
 										{interimTranscript}
 									</em>
 								</span>
-							) : error ? (
-								<span className="text-[#ff6666]" title={error}>
+							) : error || connectSessionError ? (
+								<span
+									className="text-[#ff6666]"
+									title={error ?? connectSessionError ?? undefined}
+								>
 									LINE TROUBLE — TRY AGAIN
 								</span>
 							) : (
