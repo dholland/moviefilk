@@ -1,18 +1,20 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import {
 	type VoiceTurnContext,
-	WorkersAIFluxSTT,
 	WorkersAITTS,
 	withVoice,
 } from "@cloudflare/voice";
 import { Agent, type Connection } from "agents";
 import { streamText } from "ai";
+import ElevenLabsRealtimeTranscriber from "./elevenlabs-realtime-stt.ts";
 import { KRAMER_SYSTEM_PROMPT } from "./kramer-system-prompt.ts";
 
 const KramerVoiceAgentBase = withVoice(Agent);
 
 export class KramerVoiceAgent extends KramerVoiceAgentBase {
-	transcriber = new WorkersAIFluxSTT(this.env.AI);
+	transcriber = new ElevenLabsRealtimeTranscriber({
+		apiKey: this.env.ELEVENLABS_API_KEY,
+	});
 	/** deepgram/aura-1 voice — `asteria` is a clear default; swap to tune timbre. */
 	tts = new WorkersAITTS(this.env.AI, { speaker: "asteria" });
 
