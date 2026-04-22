@@ -26,5 +26,9 @@
 			"pattern": "movieflik.biz",
 			"custom_domain": true
 		}
-	]
+	],
+	"vars": {
+		"KRAMER_TTS_MODE": "http",
+		"KRAMER_TTS_URL": "http://50.40.234.251:60069/speak"
+	}
 }

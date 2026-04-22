@@ -1,14 +1,11 @@
 import { createOpenAI } from "@ai-sdk/openai";
-import {
-	type VoiceTurnContext,
-	WorkersAITTS,
-	withVoice,
-} from "@cloudflare/voice";
+import { type VoiceTurnContext, withVoice } from "@cloudflare/voice";
 import { Agent, type Connection } from "agents";
 import { streamText } from "ai";
 import { NOW_SHOWING_TITLES } from "../lib/now-showing-catalog.ts";
 import ElevenLabsRealtimeTranscriber from "./elevenlabs-realtime-stt.ts";
 import { buildSystemPrompt } from "./kramer-system-prompt.ts";
+import { createKramerTtsProvider } from "./kramer-tts-factory.ts";
 import { sanitizeForSpeech } from "./spoken-text.ts";
 
 const KramerVoiceAgentBase = withVoice(Agent);
@@ -17,8 +14,8 @@ export class KramerVoiceAgent extends KramerVoiceAgentBase {
 	transcriber = new ElevenLabsRealtimeTranscriber({
 		apiKey: this.env.ELEVENLABS_API_KEY,
 	});
-	/** deepgram/aura-1 voice — `asteria` is a clear default; swap to tune timbre. */
-	tts = new WorkersAITTS(this.env.AI, { speaker: "asteria" });
+	/** Workers AI (`asteria`) or HTTP `/speak` — see `createKramerTtsProvider` + `KRAMER_TTS_*` env. */
+	tts = createKramerTtsProvider(this.env);
 
 	private readonly systemPrompt = buildSystemPrompt(NOW_SHOWING_TITLES);
 
@@ -31,7 +28,26 @@ export class KramerVoiceAgent extends KramerVoiceAgentBase {
 	}
 
 	beforeSynthesize(text: string, _connection: Connection): string | null {
-		return sanitizeForSpeech(text);
+		const cleaned = sanitizeForSpeech(text);
+		console.info("[KramerTTS] beforeSynthesize", {
+			inputLen: text.length,
+			outputLen: cleaned?.length ?? 0,
+			nulled: cleaned === null,
+		});
+		return cleaned;
+	}
+
+	afterSynthesize(
+		audio: ArrayBuffer | null,
+		text: string,
+		_connection: Connection,
+	): ArrayBuffer | null {
+		console.info("[KramerTTS] afterSynthesize", {
+			textLen: text.length,
+			audioBytes: audio?.byteLength ?? 0,
+			nullAudio: audio === null,
+		});
+		return audio;
 	}
 
 	async onCallStart(connection: Connection): Promise<void> {
@@ -54,7 +70,7 @@ export class KramerVoiceAgent extends KramerVoiceAgentBase {
 
 	private kramerTextStream(transcript: string, context: VoiceTurnContext) {
 		const openai = createOpenAI({ apiKey: this.env.OPENAI_API_KEY });
-		return streamText({
+		const { textStream } = streamText({
 			model: openai("gpt-5.4-mini-2026-03-17"),
 			system: this.systemPrompt,
 			messages: [
@@ -65,10 +81,17 @@ export class KramerVoiceAgent extends KramerVoiceAgentBase {
 				{ role: "user", content: transcript },
 			],
 			abortSignal: context.signal,
-		}).textStream;
+		});
+		// AI SDK 6 textStream is AsyncIterable & ReadableStream. The voice
+		// mixin's iterateText checks instanceof ReadableStream first, which
+		// can mis-route string chunks into NDJSON parsing. Strip the
+		// ReadableStream interface so iterateText uses the async-iterator path.
+		return asAsyncIterable(textStream);
 	}
 
-	private async kramerTextForSeedMessage(userLine: string): Promise<string> {
+	private async kramerTextForSeedMessage(
+		userLine: string,
+	): Promise<string> {
 		if (!this.env.OPENAI_API_KEY) {
 			return "Welcome to Movie... Fone... heh heh... it's me, Kramer! Giddy up, what movie are we doing?!";
 		}
@@ -91,5 +114,14 @@ export class KramerVoiceAgent extends KramerVoiceAgentBase {
 			// fall through
 		}
 		return "Giddy-up! Something's crackling on the line, hit me with that again!";
+	}
+}
+
+/** Yield-only wrapper that strips ReadableStream from an AsyncIterable. */
+async function* asAsyncIterable(
+	stream: AsyncIterable<string>,
+): AsyncGenerator<string> {
+	for await (const chunk of stream) {
+		yield chunk;
 	}
 }
