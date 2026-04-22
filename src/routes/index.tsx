@@ -1,6 +1,8 @@
 import { useVoiceAgent } from "@cloudflare/voice/react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useMicPermission } from "../hooks/useMicPermission";
+import type { MicPermissionStateType } from "../lib/mic-permissions";
 
 const RETRO_MOVIES = [
 	"PULP FICTION",
@@ -22,6 +24,68 @@ const RETRO_MOVIES = [
 
 type MessageType = { id: string; role: "user" | "assistant"; text: string };
 
+/**
+ * Copy for each mic permission / environment state, in status-bar uppercase.
+ * Placed at module scope so tests (and future localization) can assert on
+ * exact strings without reaching into component internals.
+ */
+const MIC_STATUS_COPY: Record<
+	Exclude<MicPermissionStateType, "granted" | "prompt" | "unknown">,
+	string
+> = {
+	"insecure-context": "HTTPS REQUIRED — OPEN ON A SECURE PAGE",
+	unsupported: "BROWSER CAN'T REACH THE MIC",
+	"no-device": "NO MIC DETECTED — PLUG ONE IN",
+	"in-use": "MIC IN USE BY ANOTHER APP — CLOSE IT AND RETRY",
+	denied: "MIC BLOCKED — UNLOCK IN BROWSER SETTINGS",
+};
+
+/**
+ * States that block CONNECT entirely — CONNECT either no-ops or the user must
+ * resolve the issue outside the page first (settings, hardware, HTTPS).
+ */
+function isMicBlocking(state: MicPermissionStateType): boolean {
+	return (
+		state === "insecure-context" ||
+		state === "unsupported" ||
+		state === "denied" ||
+		state === "no-device"
+	);
+}
+
+/**
+ * States that warrant the in-page recovery panel with a RETRY button.
+ * `insecure-context` / `unsupported` are not recoverable via a button click,
+ * so they are handled by disabling CONNECT instead.
+ */
+function isMicRecoverable(state: MicPermissionStateType): boolean {
+	return state === "denied" || state === "no-device" || state === "in-use";
+}
+
+/**
+ * Best-effort AudioContext warmup that runs synchronously on the CONNECT tap.
+ * iOS Safari ties media-output permission to a user activation, and the 2s
+ * ringing animation that gates `startCall()` would otherwise separate the
+ * tap from the library's first `AudioContext` construction.
+ *
+ * Silently no-ops if `AudioContext` is unavailable; any construction error is
+ * swallowed because the primary flow (getUserMedia via the probe) is what
+ * really matters for R1/R5 — this is belt-and-suspenders for iOS.
+ */
+function primeAudioContext(): void {
+	if (typeof window === "undefined") return;
+	if (typeof window.AudioContext !== "function") return;
+	try {
+		const ctx = new window.AudioContext();
+		void ctx.resume();
+		setTimeout(() => {
+			void ctx.close();
+		}, 0);
+	} catch {
+		// Intentionally ignored — warmup is advisory.
+	}
+}
+
 export default function KramerMoviefilk() {
 	const {
 		status: voiceStatus,
@@ -35,9 +99,22 @@ export default function KramerMoviefilk() {
 		connected,
 	} = useVoiceAgent({ agent: "KramerVoiceAgent" });
 
+	const {
+		state: micState,
+		lastErrorReason: micLastErrorReason,
+		request: micRequest,
+	} = useMicPermission();
+
 	const [phoneRinging, setPhoneRinging] = useState(false);
+	/**
+	 * The voice hook sets `connected` when the WebSocket to the agent is open
+	 * (connect() runs on mount). That is not the same as the user having started
+	 * a mic call — only this flag should drive connect vs hang-up UI.
+	 */
+	const [callSessionActive, setCallSessionActive] = useState(false);
 	const [statusText, setStatusText] = useState("LIFT RECEIVER TO CONNECT");
 	const chatRef = useRef<HTMLDivElement>(null);
+	const ringTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	const messages: MessageType[] = transcript.map((msg, messageIndex) => ({
 		id: `${msg.timestamp}-${messageIndex}`,
@@ -48,15 +125,39 @@ export default function KramerMoviefilk() {
 	const tickerText = RETRO_MOVIES.join("  ✦  ");
 
 	useEffect(() => {
+		// Precedence (highest first): voice-hook error, environment problems
+		// (insecure / unsupported), hardware problems (no-device / in-use),
+		// permission denial, ringing animation, then the normal connected
+		// voice-agent sub-states.
 		if (error) {
 			setStatusText("LINE TROUBLE — TRY AGAIN");
+			return;
+		}
+		if (micState === "insecure-context") {
+			setStatusText(MIC_STATUS_COPY["insecure-context"]);
+			return;
+		}
+		if (micState === "unsupported") {
+			setStatusText(MIC_STATUS_COPY.unsupported);
+			return;
+		}
+		if (micState === "no-device") {
+			setStatusText(MIC_STATUS_COPY["no-device"]);
+			return;
+		}
+		if (micState === "in-use") {
+			setStatusText(MIC_STATUS_COPY["in-use"]);
+			return;
+		}
+		if (micState === "denied") {
+			setStatusText(MIC_STATUS_COPY.denied);
 			return;
 		}
 		if (phoneRinging) {
 			setStatusText("DIALING...");
 			return;
 		}
-		if (!connected) {
+		if (!callSessionActive) {
 			setStatusText("LIFT RECEIVER TO CONNECT");
 			return;
 		}
@@ -74,7 +175,26 @@ export default function KramerMoviefilk() {
 				setStatusText("KRAMER IS SPEAKING...");
 				break;
 		}
-	}, [error, phoneRinging, connected, voiceStatus]);
+	}, [error, micState, phoneRinging, callSessionActive, voiceStatus]);
+
+	useEffect(() => {
+		if (!connected && callSessionActive) {
+			if (ringTimeoutRef.current) {
+				clearTimeout(ringTimeoutRef.current);
+				ringTimeoutRef.current = null;
+			}
+			setPhoneRinging(false);
+			setCallSessionActive(false);
+		}
+	}, [connected, callSessionActive]);
+
+	useEffect(() => {
+		return () => {
+			if (ringTimeoutRef.current) {
+				clearTimeout(ringTimeoutRef.current);
+			}
+		};
+	}, []);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll to bottom when transcript updates
 	useEffect(() => {
@@ -83,24 +203,57 @@ export default function KramerMoviefilk() {
 		}
 	}, [transcript]);
 
-	const handleConnect = useCallback(() => {
+	const handleConnect = useCallback(async () => {
+		// User-gesture sensitive work first (iOS Safari requires mic request and
+		// AudioContext unlock to originate from the tap itself, not a setTimeout).
+		primeAudioContext();
+
+		// Terminal-bad states: UI already surfaces the recovery panel or muted
+		// CONNECT button, so the tap is a no-op here.
+		if (isMicBlocking(micState)) return;
+
+		const resolved = await micRequest();
+		if (resolved !== "granted") {
+			// The hook has already moved into the appropriate failure state,
+			// which feeds the status bar + recovery panel via precedence above.
+			return;
+		}
+
 		setPhoneRinging(true);
-		setTimeout(() => {
+		if (ringTimeoutRef.current) {
+			clearTimeout(ringTimeoutRef.current);
+		}
+		ringTimeoutRef.current = setTimeout(() => {
+			ringTimeoutRef.current = null;
 			setPhoneRinging(false);
+			setCallSessionActive(true);
 			void startCall();
 		}, 2000);
-	}, [startCall]);
+	}, [micState, micRequest, startCall]);
 
 	const handleHangUp = useCallback(() => {
-		endCall();
+		if (ringTimeoutRef.current) {
+			clearTimeout(ringTimeoutRef.current);
+			ringTimeoutRef.current = null;
+		}
 		setPhoneRinging(false);
+		setCallSessionActive(false);
+		endCall();
 	}, [endCall]);
 
-	const isConnected = connected;
+	const handleMicRetry = useCallback(() => {
+		primeAudioContext();
+		void micRequest();
+	}, [micRequest]);
+
 	const isSpeaking = voiceStatus === "speaking";
 	const isThinking = voiceStatus === "thinking";
 	const isListenStt = voiceStatus === "listening";
-	const isConnectedVisual = isConnected;
+	const isConnectedVisual = callSessionActive;
+	const connectDisabled = phoneRinging || isMicBlocking(micState);
+	const connectMuted =
+		micState === "insecure-context" || micState === "unsupported";
+	const showMicRecoveryPanel = !callSessionActive && isMicRecoverable(micState);
 
 	return (
 		<div className="min-h-screen bg-[#0a0a0f] font-mono flex flex-col items-center p-0 overflow-hidden relative">
@@ -253,60 +406,134 @@ export default function KramerMoviefilk() {
 					</div>
 				</div>
 
-				<div className="px-5 pb-5 flex gap-3 items-center flex-wrap">
-					{!isConnected ? (
-						<button
-							type="button"
-							onClick={handleConnect}
-							disabled={phoneRinging}
-							className={`flex-1 py-4 border-2 rounded-sm text-[#ffe000] text-sm font-mono font-bold tracking-[3px] uppercase transition-all duration-100 ${
-								phoneRinging
-									? "cursor-not-allowed animate-shake translate-y-0.5 border-[#663300]"
-									: "cursor-pointer border-[#ff6600]"
-							}`}
+				<div className="px-5 pb-5 flex flex-col gap-3">
+					<div className="flex gap-3 items-center flex-wrap">
+						{!callSessionActive ? (
+							<>
+								<button
+									type="button"
+									onClick={handleConnect}
+									disabled={connectDisabled}
+									className={`flex-1 py-4 border-2 rounded-sm text-sm font-mono font-bold tracking-[3px] uppercase transition-all duration-100 ${
+										connectMuted
+											? "cursor-not-allowed border-[#444] text-[#888]"
+											: connectDisabled
+												? "cursor-not-allowed animate-shake translate-y-0.5 border-[#663300] text-[#ffe000]"
+												: "cursor-pointer border-[#ff6600] text-[#ffe000]"
+									}`}
+									style={{
+										background: connectMuted
+											? "linear-gradient(180deg, #222, #111)"
+											: connectDisabled
+												? "linear-gradient(180deg, #442200, #331a00)"
+												: "linear-gradient(180deg, #cc4400, #991100)",
+										boxShadow:
+											connectMuted || connectDisabled
+												? "none"
+												: "0 4px 0 #660000, 0 0 20px rgba(204,68,0,0.4)",
+									}}
+								>
+									{phoneRinging
+										? "☎ RINGING..."
+										: connectMuted
+											? "☎ OFFLINE"
+											: "☎  CONNECT  ☎"}
+								</button>
+								{phoneRinging && (
+									<button
+										type="button"
+										onClick={handleHangUp}
+										className="py-4 px-5 border-2 border-[#660000] rounded-sm text-[#ff4444] text-[13px] font-mono font-bold tracking-[2px] cursor-pointer uppercase transition-all duration-100"
+										style={{
+											background: "linear-gradient(180deg, #440000, #220000)",
+											boxShadow: "0 4px 0 #110000",
+										}}
+									>
+										✕ CANCEL
+									</button>
+								)}
+							</>
+						) : (
+							<>
+								<button
+									type="button"
+									onClick={toggleMute}
+									className="flex-1 py-4 border-2 rounded-sm text-[13px] font-mono font-bold tracking-[2px] uppercase transition-all duration-150 border-[#00aa22] text-[#88ff88] cursor-pointer"
+									style={{
+										background: isMuted
+											? "linear-gradient(180deg, #442200, #220000)"
+											: "linear-gradient(180deg, #006600, #004400)",
+										boxShadow: isMuted ? "none" : "0 4px 0 #002200",
+									}}
+								>
+									{isMuted ? "🔇 MUTED — UNMUTE" : "🎤 MIC ON — TAP TO MUTE"}
+								</button>
+								<button
+									type="button"
+									onClick={handleHangUp}
+									className="py-4 px-5 border-2 border-[#660000] rounded-sm text-[#ff4444] text-[13px] font-mono font-bold tracking-[2px] cursor-pointer uppercase transition-all duration-100"
+									style={{
+										background: "linear-gradient(180deg, #440000, #220000)",
+										boxShadow: "0 4px 0 #110000",
+									}}
+								>
+									✕ HANG UP
+								</button>
+							</>
+						)}
+					</div>
+
+					{showMicRecoveryPanel && (
+						<div
+							role="status"
+							aria-live="polite"
+							data-testid="mic-recovery-panel"
+							className="border-2 border-[#663300] rounded-sm px-4 py-3 flex flex-col gap-2"
 							style={{
-								background: phoneRinging
-									? "linear-gradient(180deg, #442200, #331a00)"
-									: "linear-gradient(180deg, #cc4400, #991100)",
-								boxShadow: phoneRinging
-									? "none"
-									: "0 4px 0 #660000, 0 0 20px rgba(204,68,0,0.4)",
+								background: "linear-gradient(180deg, #1a0f00, #0f0700)",
+								boxShadow: "inset 0 0 20px rgba(204,68,0,0.15)",
 							}}
 						>
-							{phoneRinging ? "☎ RINGING..." : "☎  CONNECT  ☎"}
-						</button>
-					) : (
-						<>
+							<div className="text-[#ffaa44] text-[11px] tracking-[2px] font-bold uppercase">
+								{micState === "denied" && "🔒 MIC BLOCKED"}
+								{micState === "no-device" && "🎤 NO MIC FOUND"}
+								{micState === "in-use" && "🎤 MIC BUSY"}
+							</div>
+							<div className="text-[#cc9966] text-[11px] leading-relaxed">
+								{micState === "denied" && (
+									<>
+										Click the <span aria-hidden="true">🔒</span> in your address
+										bar and set <strong>Microphone</strong> to <em>Allow</em>,
+										then retry.
+									</>
+								)}
+								{micState === "no-device" &&
+									"Plug in or enable a microphone, then retry."}
+								{micState === "in-use" &&
+									"Another app is using the mic. Close it (Zoom, Meet, browser tabs) and retry."}
+							</div>
+							{micLastErrorReason && (
+								<div className="text-[#885533] text-[10px] italic opacity-80">
+									{micLastErrorReason}
+								</div>
+							)}
 							<button
 								type="button"
-								onClick={toggleMute}
-								className="flex-1 py-4 border-2 rounded-sm text-[13px] font-mono font-bold tracking-[2px] uppercase transition-all duration-150 border-[#00aa22] text-[#88ff88] cursor-pointer"
+								onClick={handleMicRetry}
+								className="self-start mt-1 py-2 px-4 border-2 border-[#ff6600] rounded-sm text-[#ffe000] text-[11px] font-mono font-bold tracking-[2px] uppercase cursor-pointer"
 								style={{
-									background: isMuted
-										? "linear-gradient(180deg, #442200, #220000)"
-										: "linear-gradient(180deg, #006600, #004400)",
-									boxShadow: isMuted ? "none" : "0 4px 0 #002200",
+									background: "linear-gradient(180deg, #cc4400, #991100)",
+									boxShadow: "0 2px 0 #660000",
 								}}
 							>
-								{isMuted ? "🔇 MUTED — UNMUTE" : "🎤 MIC ON — TAP TO MUTE"}
+								↻ RETRY
 							</button>
-							<button
-								type="button"
-								onClick={handleHangUp}
-								className="py-4 px-5 border-2 border-[#660000] rounded-sm text-[#ff4444] text-[13px] font-mono font-bold tracking-[2px] cursor-pointer uppercase transition-all duration-100"
-								style={{
-									background: "linear-gradient(180deg, #440000, #220000)",
-									boxShadow: "0 4px 0 #110000",
-								}}
-							>
-								✕ HANG UP
-							</button>
-						</>
+						</div>
 					)}
 				</div>
 			</div>
 
-			{isConnected && isSpeaking && (
+			{callSessionActive && isSpeaking && (
 				<div className="text-[#555] text-[10px] text-center max-w-[680px] px-5 -mt-2 mb-2 relative z-10">
 					Streaming reply — you can jump in; interrupt may cancel playback.
 				</div>

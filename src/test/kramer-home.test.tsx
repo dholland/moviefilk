@@ -7,9 +7,20 @@ vi.mock("@cloudflare/voice/react", () => ({
 	useVoiceAgent: (options: { agent: string }) => useVoiceAgentMock(options),
 }));
 
+const useMicPermissionMock = vi.fn();
+vi.mock("../hooks/useMicPermission", () => ({
+	useMicPermission: () => useMicPermissionMock(),
+}));
+
 describe("KramerMoviefilk", () => {
 	beforeEach(() => {
 		useVoiceAgentMock.mockReset();
+		useMicPermissionMock.mockReset();
+		useMicPermissionMock.mockReturnValue({
+			state: "prompt",
+			lastErrorReason: null,
+			request: vi.fn(),
+		});
 	});
 
 	it("shows connect and standby when the voice client is not connected", () => {
