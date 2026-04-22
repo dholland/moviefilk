@@ -23,7 +23,7 @@
 	],
 	"routes": [
 		{
-			"pattern": "movieflik.biz/*",
+			"pattern": "movieflik.biz",
 			"custom_domain": true
 		}
 	]
